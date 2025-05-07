@@ -23,16 +23,20 @@ import org.apache.maven.plugins.annotations.Component
 import org.apache.maven.plugins.annotations.Mojo
 import org.apache.maven.plugins.annotations.Parameter
 import org.apache.maven.plugins.annotations.ResolutionScope
+import groovy.transform.Data
+import static java.nio.file.Files.walkFileTree
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 
 class Watch {
 	public File on
-	public String run	
+	public String run
 }
 
-@Data 
+@Data
 class PluginGoal {
 	Plugin plugin;
-	String goal;	
+	String goal;
 }
 
 @Mojo(name='run', requiresDependencyResolution=ResolutionScope::COMPILE_PLUS_RUNTIME)
@@ -45,28 +49,28 @@ class Watcher extends AbstractMojo {
 	PluginPrefixResolver pluginPrefixResolver
 	@Component
 	PluginVersionResolver pluginVersionResolver;
-	@Component 
+	@Component
 	Maven maven
 
 	override execute() throws MojoExecutionException, MojoFailureException {
 		for(w : watch) {
-			register(w.on)			
+			registerRecursively(w.on)
 		}
 		val Map<String, List<String>> watchMap = newHashMap()
 		for(w : watch) {
 			val goal = w.run.split(' ').map[trim]
 			watchMap.put(w.on.absolutePath, goal)
 		}
-		log.info("Waiting: "+watch.map[on]);
+		log.info("Waiting for changes in: "+watch.map[on]);
 		watchLoop[
 				val goals = watchMap.get(it.absolutePath)
 				log.debug(it + " -> " + goals)
 				if(goals != null) {
 					log.info(it +" changed -> ["+goals.join(' ')+"]");
 					val request=DefaultMavenExecutionRequest.copy(session.request);
-					request.setGoals(goals);				
+					request.setGoals(goals);
 					maven.execute(request)
-				}  
+				}
 			]
 	}
 
@@ -75,19 +79,15 @@ class Watcher extends AbstractMojo {
 		val plugin = new Plugin()
 		plugin.groupId = pluginResult.groupId
 		plugin.artifactId = pluginResult.artifactId
-		
+
 		var versionRequest = new DefaultPluginVersionRequest(
 			plugin,
-			session) 
+			session)
 		plugin.version = pluginVersionResolver.resolve(versionRequest).getVersion();
 		return plugin
 	}
-	
+
 	val watchService = FileSystems.^default.newWatchService
-	def watch(File file, (File)=>void run) {
-		register(file)
-		watchLoop(run)		
-	}
 
 	def watchLoop((File)=>void run) {
 		var valid = true;
@@ -98,16 +98,34 @@ class Watcher extends AbstractMojo {
 				.map[log.debug("WatchService event: "+it.kind+":"+it.context); it]
 				.map[it as WatchEvent<Path>]
 				.filter[kind != StandardWatchEventKinds.OVERFLOW]
-				.map[(key.watchable as Path).resolve(it.context)]				
+				.map[(key.watchable as Path).resolve(it.context)]
 				.map[toFile]
 				.forEach[run.apply(it)]
 			valid = key.reset
-		} 
+		}
 	}
 
+	def registerRecursively(File rootDir) {
+		if (!rootDir.isDirectory()) {
+			// If 'on' is a file, just register its parent as before
+			register(rootDir)
+			return
+		}
+
+		walkFileTree(rootDir.toPath(), new SimpleFileVisitor<Path>() {
+			@Override
+			Path preVisitDirectory(Path dir, BasicFileAttributes attrs) throws java.io.IOException {
+				log.debug("Registering directory for watch: " + dir.toAbsolutePath())
+				dir.register(watchService, StandardWatchEventKinds.ENTRY_MODIFY)
+				return super.preVisitDirectory(dir, attrs)
+			}
+		})
+	}
+
+	// Keep the original register method for handling file inputs
 	def register(File file) {
 		val path = Paths.get(file.absoluteFile.parent)
-		log.debug("register: "+path + "\t"+file+"\n"+path.absolute)
+		log.debug("register (file): "+path + "\t"+file+"\n"+path.absolute)
 		path.register(watchService, StandardWatchEventKinds.ENTRY_MODIFY)
 	}
 }
